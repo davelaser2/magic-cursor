@@ -1,66 +1,63 @@
 /**
-	* @author David Rahn <https://github.com/lasernyc>
-*/
+ * @author David Rahn <https://github.com/lasernyc>
+ */
 
 var MagicCursor = (function() {
-
 	var canvas, cursorSettings, ctx, LOOP, xDirection, yDirection;
-
-	var oldx              = 0;
-	var oldy              = 0;
-	var buffer            = 0;
-	var pointSet          = [];
-	var trailSet          = [];
-	var initialized       = false;
-	var canvasBuilt       = false;
+	// Persistent animation state and particle collections
+	var previousX = 0;
+	var previousY = 0;
+	var buffer = 0;
+	var pointSet = [];
+	var trailSet = [];
+	var initialized = false;
+	var canvasBuilt = false;
+	var resizeHandler = null;
 
 	function setupCursor(settings) {
+		// Merge defaults with user-provided configuration
+		// and normalize derived settings for the animation loop.
+		cursorSettings = Object.assign({
+			enableTrail: true,
+			trailDensity: 6,
+			trailGravity: -0.5,
+			trailColor: '211, 5, 252',
+			singlePointChar: '+',
+			pointSize: 16,
+			pointAmount: 70,
+			pointGravity: 1,
+			pointDissolveRate: 80,
+			pointColors: ['4, 210, 218', '27, 55, 224', '211, 5, 252']
+		}, settings || {});
 
-		cursorSettings = {
-			enableTrail:         true,
-			trailDensity:        6,
-			trailGravity:        -0.5,
-			trailColor:          '211, 5, 252',
-			singlePointChar:     '+',
-			pointSize:           16,
-			pointAmount:         70,
-			pointGravity:        1,
-			pointDissolveRate:   80,
-			pointColors:         ['4, 210, 218', '27, 55, 224', '211, 5, 252']
-		}
-
-		// Override with user settings if provided
-		Object.keys(settings || {}).forEach(function(key){
-			cursorSettings[key] = settings[key];
-		});
-
-		cursorSettings.pointAmount        = Math.floor(100 - cursorSettings.pointAmount);
-		cursorSettings.pointDissolveRate  = cursorSettings.pointDissolveRate / 1000;
+		var amount = Math.min(Math.max(cursorSettings.pointAmount, 0), 99);
+		cursorSettings.pointAmount = amount;
+		cursorSettings.pointThrottle = Math.max(1, 100 - amount);
+		cursorSettings.pointDissolveRate = Math.max(cursorSettings.pointDissolveRate, 0) / 1000;
 	}
 
-	 /**
+	/**
 	 * A single cursor point
 	 * @constructor
 	 */
 	function SinglePoint(e) {
-		this.x = e.pageX;
-		this.y = e.pageY - window.pageYOffset;
+		this.x = e.clientX;
+		this.y = e.clientY;
 		this.color = cursorSettings.pointColors[getRandomInt(0, cursorSettings.pointColors.length)];
 		this.opacity = 1;
 		this.xDirection = xDirection;
-		this.yDirection = yDirection;
 		this.fontSize = cursorSettings.pointSize;
 		this.xModifier = getRandomFloat(0.1, 0.5);
 		this.gravity = cursorSettings.pointGravity;
 	}
 
-	 /**
+	/**
 	 * A single trail item
 	 * @constructor
 	 */
 	function Trail(e) {
-		this.x = e.pageX;
-		this.y = e.pageY - window.pageYOffset;
+		this.x = e.clientX;
+		this.y = e.clientY;
 		this.size = cursorSettings.trailDensity;
 		this.opacity = 1;
 	}
@@ -73,75 +70,95 @@ var MagicCursor = (function() {
 		return Math.floor(Math.random() * (max - min) + min);
 	}
 
+	function debounce(fn, delay) {
+		// Debounce repeated resize events to reduce layout thrash.
+		var timeoutId;
+		return function() {
+			var args = arguments;
+			clearTimeout(timeoutId);
+			timeoutId = setTimeout(function() {
+				fn.apply(null, args);
+			}, delay);
+		};
+	}
+
 	function setCanvasSize() {
+		// Keep the canvas sized to the browser viewport.
 		canvas.width = window.innerWidth;
 		canvas.height = window.innerHeight;
 	}
 
 	function setDirection(e) {
-		xDirection = e.pageX < oldx ? 'left' : 'right';
-		yDirection = e.pageY < oldy ? 'up' : 'down';
-		oldx = e.pageX;
-		oldy = e.pageY;
+		// Track the cursor direction so new points can drift consistently.
+		xDirection = e.clientX < previousX ? 'left' : 'right';
+		yDirection = e.clientY < previousY ? 'up' : 'down';
+		previousX = e.clientX;
+		previousY = e.clientY;
 	}
 
 	function drawTrails() {
-		for (var j = 0; j < trailSet.length; j++){
-			var _this = trailSet[j];
-			_this.opacity = _this.opacity - 0.06;
-			_this.size = _this.size - 0.5;
-			_this.y = (_this.y - 1) + cursorSettings.trailGravity;
-			ctx.fillStyle = 'rgba(' + cursorSettings.trailColor + ',' + _this.opacity + ')';
-			ctx.fillRect(_this.x, _this.y - 5, _this.size, _this.size);
+		var activeTrails = [];
+
+		for (var j = 0; j < trailSet.length; j++) {
+			var trail = trailSet[j];
+			trail.opacity -= 0.06;
+			trail.size -= 0.5;
+			trail.y += cursorSettings.trailGravity - 1;
+			ctx.fillStyle = 'rgba(' + cursorSettings.trailColor + ',' + trail.opacity + ')';
+			ctx.fillRect(trail.x, trail.y - 5, trail.size, trail.size);
+
+			if (trail.opacity > 0) {
+				activeTrails.push(trail);
+			}
 		}
 
-		// strip this trail item from existence once it's no longer visible
-		if (trailSet.length > 80){
-			trailSet.splice(0,1);
-		}
+		trailSet = activeTrails;
 	}
 
 	function drawPoints() {
+		var activePoints = [];
+
 		for (var i = 0; i < pointSet.length; i++) {
-			var _this = pointSet[i];
-			_this.opacity = _this.opacity - 0.01;
-			_this.fontSize = _this.fontSize - (cursorSettings.pointDissolveRate);
-			_this.y = _this.y + _this.gravity;
-			_this.x = _this.xDirection === 'left' ? (_this.x - _this.xModifier) : (_this.x + _this.xModifier);
-			ctx.font = '100 '+ _this.fontSize + 'px Courier';
-			ctx.fillStyle = 'rgba(' + _this.color + ',' + _this.opacity + ')';
-			ctx.fillText(cursorSettings.singlePointChar, _this.x, _this.y);
-		
-			// strip this star from existence once it's no longer visible
-			if (_this.opacity <= 0.3){
-				pointSet.splice(0, i + 1);
+			var point = pointSet[i];
+			point.opacity -= 0.01;
+			point.fontSize -= cursorSettings.pointDissolveRate;
+			point.y += point.gravity;
+			point.x += point.xDirection === 'left' ? -point.xModifier : point.xModifier;
+			ctx.font = '100 ' + point.fontSize + 'px Courier';
+			ctx.fillStyle = 'rgba(' + point.color + ',' + point.opacity + ')';
+			ctx.fillText(cursorSettings.singlePointChar, point.x, point.y);
+
+			if (point.opacity > 0.3) {
+				activePoints.push(point);
 			}
 		}
+
+		pointSet = activePoints;
 	}
 
-
 	function drawEverything() {
+		// Main animation frame: clear, render particles, then request the next frame.
 		ctx.clearRect(0, 0, canvas.width, canvas.height);
 		drawPoints();
 
-		// if currently looping, stop for tablet size and smaller
-		if (window.innerWidth < 767){
+		if (window.innerWidth < 767) {
 			destroyCursor();
 			return;
 		}
 
-		LOOP = requestAnimationFrame(drawEverything);
-
-		if (cursorSettings.trailDensity > 0 && cursorSettings.enableTrail){
+		if (cursorSettings.trailDensity > 0 && cursorSettings.enableTrail) {
 			drawTrails();
 		}
+
+		LOOP = requestAnimationFrame(drawEverything);
 	}
 
 	function mouseMoveEvent(e) {
+		// Add trail fragments continuously, but only add full points at a reduced rate.
 		trailSet.push(new Trail(e));
-		// throttle stars
-		buffer++;
-		if (buffer >= cursorSettings.pointAmount/10){
+		buffer += 1;
+
+		if (buffer >= cursorSettings.pointThrottle / 10) {
 			buffer = 0;
 			setDirection(e);
 			pointSet.push(new SinglePoint(e));
@@ -149,37 +166,47 @@ var MagicCursor = (function() {
 	}
 
 	function destroyCursor() {
-		LOOP = cancelAnimationFrame(drawEverything);
+		// Stop the frame loop and remove all event listeners.
+		if (LOOP) {
+			cancelAnimationFrame(LOOP);
+			LOOP = null;
+		}
+
 		initialized = false;
-		window.removeEventListener('resize', setCanvasSize); //TODO, throttle this
+
+		if (resizeHandler) {
+			window.removeEventListener('resize', resizeHandler);
+			resizeHandler = null;
+		}
+
 		document.removeEventListener('mousemove', mouseMoveEvent);
+		pointSet.length = 0;
+		trailSet.length = 0;
 	}
 
 	return {
-		init: function(settings){
+		// Creates the cursor effect if the viewport is large enough and it is not already running.
+		init: function(settings) {
 			if (window.innerWidth > 1025 && !initialized) {
-				// if there's no canvas, build it
-				if (!canvasBuilt){
+				if (!canvasBuilt) {
 					canvas = document.createElement('canvas');
-					var canvasStyles = "background-color: transparent; position: fixed; top: 0; left: 0; z-index: 12000; pointer-events: none;";
+					var canvasStyles = 'background-color: transparent; position: fixed; top: 0; left: 0; z-index: 12000; pointer-events: none;';
 					canvas.id = 'mouse-trail';
 					canvas.setAttribute('style', canvasStyles);
 					document.body.insertBefore(canvas, document.body.firstChild);
 					canvasBuilt = true;
-					setupCursor(settings);
 				}
 
-				// setup canvas and kick off loop
-				ctx = canvas.getContext("2d");
+				setupCursor(settings);
+				ctx = canvas.getContext('2d');
 				setCanvasSize();
+				resizeHandler = debounce(setCanvasSize, 100);
+				window.addEventListener('resize', resizeHandler);
+				document.addEventListener('mousemove', mouseMoveEvent);
 				LOOP = requestAnimationFrame(drawEverything);
 				initialized = true;
-
-				// attach events
-				window.addEventListener('resize', setCanvasSize);
-				document.addEventListener('mousemove', mouseMoveEvent);
 			}
-		}
-	}
-
+		},
+		destroy: destroyCursor
+	};
 })();
